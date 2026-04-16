@@ -8,18 +8,22 @@ import { bookLoftySlot, bookLoftySlotL2 } from '@/lib/lofty-booker';
 import { POST as bookSlotPost } from '@/app/api/book-slot/route';
 import { resolveBookSlotDateTime } from '@/lib/book-slot-datetime';
 import { unixSecondsInCentral } from '@/lib/central-datetime-unix';
+import {
+  bookBrivityViaGreminders,
+  buildBrivityGremindersUrl,
+  resolveBrivityGremindersConfigFromEnv,
+} from '@/lib/brivity-greminders-booker';
 
 const BOOK_HOUSEJET_PPC_URL =
   process.env.BOOK_HOUSEJET_PPC_URL || 'https://xggz-mymh-hmop.n7c.xano.io/api:oLrvDV0I/book-housejet-ppc';
-
-const BOOK_BRIVITY_URL =
-  process.env.BOOK_BRIVITY_URL || 'https://xggz-mymh-hmop.n7c.xano.io/api:oLrvDV0I/book_brivity';
 
 const security = new SecurityMiddleware();
 
 /** Status codes for Zapier pathing: success=200, failure=201 */
 const STATUS_SUCCESS = 200;
 const STATUS_FAILURE = 201;
+/** Brivity GReminders Playwright automation failed (slot/nav/confirmation) — distinct from 201 validation/Xano failures */
+const STATUS_BRIVITY_AUTOMATION_FAILURE = 202;
 
 const VENDORS = [
   'cinq',
@@ -41,20 +45,6 @@ function isValidDate(dateStr: string): boolean {
   const [y, m, d] = dateStr.split('-').map(Number);
   const date = new Date(y, m - 1, d);
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
-}
-
-/** E.164 US-style: +1 plus digits; avoids double +1 when input already includes country code. */
-function toFullPhoneUs(phone: string): string {
-  const trimmed = phone.trim();
-  const digits = trimmed.replace(/\D/g, '');
-  if (trimmed.startsWith('+')) {
-    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-    if (digits.length === 10) return `+1${digits}`;
-    return `+${digits}`;
-  }
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  if (digits.length === 10) return `+1${digits}`;
-  return `+1${digits}`;
 }
 
 /** Chili Piper via book-slot: send either `dateTime` or both `date` (YYYY-MM-DD) and `time` (e.g. 1:25 PM). If both are sent, `dateTime` wins. */
@@ -439,95 +429,64 @@ export async function POST(request: NextRequest) {
         return security.addSecurityHeaders(NextResponse.json(errorResponse, { status: STATUS_FAILURE }));
       }
 
-      const dStr = String(unixSec);
-      let brivityUrlHost = '';
-      try {
-        brivityUrlHost = new URL(BOOK_BRIVITY_URL).host;
-      } catch {
-        brivityUrlHost = '(invalid BOOK_BRIVITY_URL)';
+      const grConfig = resolveBrivityGremindersConfigFromEnv();
+      if (!grConfig) {
+        const responseTime = Date.now() - requestStartTime;
+        console.log('[brivity] validation failed', { requestId, reason: 'missing_greminders_env' });
+        const errorResponse = ErrorHandler.createError(
+          ErrorCode.VALIDATION_ERROR,
+          'Missing GReminders configuration',
+          'Set BRIVITY_GREMINDERS_BASE_URL and BRIVITY_GREMINDERS_LO for vendor brivity',
+          undefined,
+          requestId,
+          responseTime
+        );
+        return security.addSecurityHeaders(NextResponse.json(errorResponse, { status: STATUS_FAILURE }));
       }
 
-      console.log('[brivity xano] start', {
+      const bookingUrl = buildBrivityGremindersUrl({
+        baseUrl: grConfig.baseUrl,
+        lo: grConfig.lo,
+        unixSecondsD: unixSec,
+        firstName,
+        lastName,
+        email,
+        phone: phoneTrimmed,
+        meetingMinutes: grConfig.meetingMinutes,
+        timezone: grConfig.timezone,
+        teamSizeTier: grConfig.teamSizeTier,
+      });
+
+      console.log('[brivity greminders] start', {
         requestId,
         date: brivityDate,
         time: brivityTime,
         dateTime: body.dateTime,
-        d: dStr,
-        urlHost: brivityUrlHost,
-      });
-
-      const xanoBody: Record<string, string> = {
-        d: dStr,
-        m: '30',
-        first_name: firstName,
-        last_name: lastName,
-        email,
-        phone: phoneTrimmed,
-        full_phone: toFullPhoneUs(phoneTrimmed),
-      };
-
-      console.log('[brivity xano] request', {
-        url: BOOK_BRIVITY_URL,
-        method: 'POST',
-        body: xanoBody,
+        d: String(unixSec),
+        urlHost: (() => {
+          try {
+            return new URL(bookingUrl).host;
+          } catch {
+            return '(invalid booking URL)';
+          }
+        })(),
       });
 
       try {
-        const res = await fetch(BOOK_BRIVITY_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(xanoBody),
-          signal: AbortSignal.timeout(15000),
-        });
-        const resJson = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        const result = await concurrencyManager.execute(
+          () => bookBrivityViaGreminders(bookingUrl),
+          120_000
+        );
 
-        console.log('[brivity xano] response', {
-          status: res.status,
-          ok: res.ok,
-          body: resJson,
-        });
-
-        const msgRaw = resJson.message;
-        const messageStr = typeof msgRaw === 'string' ? msgRaw.trim().toLowerCase() : '';
-
-        if (!res.ok) {
-          const errMsg =
-            (typeof resJson.message === 'string' && resJson.message) ||
-            (typeof resJson.error === 'string' && resJson.error) ||
-            `External API returned ${res.status}`;
-          console.log('[brivity xano] outcome', {
-            requestId,
-            outcome: 'http_error',
-            clientStatus: STATUS_FAILURE,
-            httpStatus: res.status,
-          });
-          const errorResponse = ErrorHandler.createError(
-            ErrorCode.SCRAPING_FAILED,
-            errMsg,
-            errMsg,
-            { status: res.status, response: resJson },
-            requestId,
-            Date.now() - requestStartTime
-          );
-          return security.addSecurityHeaders(
-            NextResponse.json(errorResponse, { status: STATUS_FAILURE })
-          );
-        }
-
-        if (messageStr === 'success') {
-          console.log('[brivity xano] outcome', {
-            requestId,
-            outcome: 'success',
-            clientStatus: STATUS_SUCCESS,
-          });
+        if (result.ok) {
+          console.log('[brivity greminders] outcome', { requestId, outcome: 'success' });
           const successResponse = ErrorHandler.createSuccess(
             SuccessCode.OPERATION_SUCCESS,
             {
-              message: 'Brivity booking succeeded',
+              message: 'success',
               vendor: 'brivity',
               date: brivityDate,
               time: brivityTime,
-              externalResponse: resJson,
             },
             requestId,
             Date.now() - requestStartTime
@@ -537,55 +496,35 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        if (messageStr === 'failed') {
-          console.log('[brivity xano] outcome', {
-            requestId,
-            outcome: 'failed',
-            clientStatus: STATUS_FAILURE,
-          });
-          const errorResponse = ErrorHandler.createError(
-            ErrorCode.SCRAPING_FAILED,
-            'Brivity booking failed',
-            (typeof resJson.message === 'string' && resJson.message) || 'Xano reported booking failure',
-            { response: resJson },
-            requestId,
-            Date.now() - requestStartTime
-          );
-          return security.addSecurityHeaders(
-            NextResponse.json(errorResponse, { status: STATUS_FAILURE })
-          );
-        }
-
-        console.log('[brivity xano] outcome', {
+        console.log('[brivity greminders] outcome', {
           requestId,
-          outcome: 'unexpected_message',
-          clientStatus: STATUS_FAILURE,
-          message: msgRaw,
+          outcome: 'failed',
+          error: result.error,
         });
         const errorResponse = ErrorHandler.createError(
           ErrorCode.SCRAPING_FAILED,
-          'Unexpected response from Brivity API',
-          `Expected message success or failed, got: ${String(msgRaw)}`,
-          { response: resJson },
+          'failed',
+          result.error,
+          { bookingAutomation: true },
           requestId,
           Date.now() - requestStartTime
         );
         return security.addSecurityHeaders(
-          NextResponse.json(errorResponse, { status: STATUS_FAILURE })
+          NextResponse.json(errorResponse, { status: STATUS_BRIVITY_AUTOMATION_FAILURE })
         );
       } catch (err) {
         const errMessage = err instanceof Error ? err.message : String(err);
-        console.log('[brivity xano] request failed', { requestId, error: errMessage });
+        console.log('[brivity greminders] request failed', { requestId, error: errMessage });
         const errorResponse = ErrorHandler.createError(
           ErrorCode.SCRAPING_FAILED,
-          errMessage,
+          'failed',
           errMessage,
           { originalError: errMessage },
           requestId,
           Date.now() - requestStartTime
         );
         return security.addSecurityHeaders(
-          NextResponse.json(errorResponse, { status: STATUS_FAILURE })
+          NextResponse.json(errorResponse, { status: STATUS_BRIVITY_AUTOMATION_FAILURE })
         );
       }
     }
