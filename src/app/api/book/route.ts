@@ -17,6 +17,10 @@ import {
 const BOOK_HOUSEJET_PPC_URL =
   process.env.BOOK_HOUSEJET_PPC_URL || 'https://xggz-mymh-hmop.n7c.xano.io/api:oLrvDV0I/book-housejet-ppc';
 
+const BOOK_REAL_GEEK_URL =
+  process.env.BOOK_REAL_GEEK_URL ||
+  'https://xggz-mymh-hmop.n7c.xano.io/api:oLrvDV0I/book_real_geeks';
+
 const security = new SecurityMiddleware();
 
 /** Status codes for Zapier pathing: success=200, failure=201 */
@@ -30,6 +34,7 @@ const VENDORS = [
   'luxury-presence',
   'agentfire',
   'housejet-ppc',
+  'real-geeks',
   'brivity',
   'lofty',
   'lofty-5-9',
@@ -324,6 +329,119 @@ export async function POST(request: NextRequest) {
       } catch (err) {
         const errMessage = err instanceof Error ? err.message : String(err);
         console.log('[housejet-ppc xano] request failed', { error: errMessage });
+        const errorResponse = ErrorHandler.createError(
+          ErrorCode.SCRAPING_FAILED,
+          errMessage,
+          errMessage,
+          { originalError: errMessage },
+          requestId,
+          Date.now() - requestStartTime
+        );
+        return security.addSecurityHeaders(
+          NextResponse.json(errorResponse, { status: STATUS_FAILURE })
+        );
+      }
+    }
+
+    if (vendor === 'real-geeks') {
+      const parsed = resolveBookSlotDateTime({
+        dateTime: body.dateTime as string | undefined,
+        date: body.date as string | undefined,
+        time: body.time as string | undefined,
+      });
+      if (!parsed) {
+        const responseTime = Date.now() - requestStartTime;
+        const errorResponse = ErrorHandler.createError(
+          ErrorCode.VALIDATION_ERROR,
+          'Missing or invalid date/time',
+          'Provide dateTime (e.g. "November 13, 2025 at 1:25 PM CST") or both date (YYYY-MM-DD) and time (e.g. 1:25 PM) (vendor real-geeks)',
+          undefined,
+          requestId,
+          responseTime
+        );
+        return security.addSecurityHeaders(NextResponse.json(errorResponse, { status: STATUS_FAILURE }));
+      }
+      const { date: rgDate, time: rgTime } = parsed;
+      const unixSec = unixSecondsInCentral(rgDate, rgTime);
+      if (unixSec === null) {
+        const responseTime = Date.now() - requestStartTime;
+        const errorResponse = ErrorHandler.createError(
+          ErrorCode.VALIDATION_ERROR,
+          'Invalid date/time',
+          'Could not resolve slot time in US Central (vendor real-geeks)',
+          { providedValue: { date: rgDate, time: rgTime } },
+          requestId,
+          responseTime
+        );
+        return security.addSecurityHeaders(NextResponse.json(errorResponse, { status: STATUS_FAILURE }));
+      }
+      const timeSlot = unixSec * 1000;
+      const xanoRequestBody = {
+        firstName,
+        lastName,
+        email,
+        phone: phone ?? '',
+        timeSlot,
+      };
+      console.log('[real-geeks xano] request', {
+        url: BOOK_REAL_GEEK_URL,
+        method: 'POST',
+        body: xanoRequestBody,
+      });
+
+      try {
+        const res = await fetch(BOOK_REAL_GEEK_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(xanoRequestBody),
+          signal: AbortSignal.timeout(15000),
+        });
+        const resJson = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+
+        console.log('[real-geeks xano] response', {
+          status: res.status,
+          ok: res.ok,
+          body: resJson,
+        });
+
+        if (!res.ok) {
+          const errMsg =
+            (resJson.message as string) ||
+            (resJson.error as string) ||
+            `External API returned ${res.status}`;
+          const errorResponse = ErrorHandler.createError(
+            ErrorCode.SCRAPING_FAILED,
+            errMsg,
+            errMsg,
+            { status: res.status, response: resJson },
+            requestId,
+            Date.now() - requestStartTime
+          );
+          return security.addSecurityHeaders(
+            NextResponse.json(errorResponse, { status: STATUS_FAILURE })
+          );
+        }
+        const successResponse = ErrorHandler.createSuccess(
+          SuccessCode.OPERATION_SUCCESS,
+          {
+            message: 'Real Geeks booking requested',
+            vendor: 'real-geeks',
+            date: rgDate,
+            time: rgTime,
+            timeSlot,
+            ...(resJson && typeof resJson === 'object' && Object.keys(resJson).length > 0
+              ? { externalResponse: resJson }
+              : {}),
+          },
+          requestId,
+          Date.now() - requestStartTime
+        );
+        return security.addSecurityHeaders(
+          NextResponse.json(successResponse, { status: STATUS_SUCCESS })
+        );
+      } catch (err) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        console.log('[real-geeks xano] request failed', { error: errMessage });
         const errorResponse = ErrorHandler.createError(
           ErrorCode.SCRAPING_FAILED,
           errMessage,
