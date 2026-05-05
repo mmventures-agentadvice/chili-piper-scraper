@@ -1,4 +1,4 @@
-# Chili Piper Slot Scraper
+# Booking Engine
 
 A production-ready web scraping service that automatically extracts available meeting slots from Chili Piper forms. Built with Next.js, TypeScript, and Playwright for reliable browser automation.
 
