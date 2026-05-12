@@ -22,6 +22,8 @@ export enum ErrorCode {
   BROWSER_ERROR = 'BROWSER_ERROR',
   TIMEOUT_ERROR = 'TIMEOUT_ERROR',
   SLOT_NOT_FOUND = 'SLOT_NOT_FOUND',
+  /** Chili Piper: no bookable slot within configured ±minutes window (HTTP 203). */
+  SLOT_WINDOW_EXHAUSTED = 'SLOT_WINDOW_EXHAUSTED',
   DAY_BUTTON_NOT_FOUND = 'DAY_BUTTON_NOT_FOUND',
   
   // Concurrency Errors (503)
@@ -124,7 +126,11 @@ export class ErrorHandler {
       
       case ErrorCode.RATE_LIMIT_EXCEEDED:
         return 429;
-      
+
+      /** Project-specific: Chili Piper no bookable slot in ±fallback window (not RFC 203 semantics). */
+      case ErrorCode.SLOT_WINDOW_EXHAUSTED:
+        return 203;
+
       case ErrorCode.QUEUE_FULL:
       case ErrorCode.SERVICE_UNAVAILABLE:
         return 503;

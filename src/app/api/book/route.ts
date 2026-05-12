@@ -52,6 +52,43 @@ function isValidDate(dateStr: string): boolean {
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
 }
 
+/** Strip leading US country code for Real Geeks Xano (HubSpot expects local digits). */
+function phoneForRealGeeksXano(phone: string): string {
+  const t = phone.trim();
+  if (t.startsWith('+1')) return t.slice(2).trim();
+  return t;
+}
+
+type RealGeeksHubSpotParse =
+  | { failed: true; message: string; errorType?: string }
+  | { failed: false };
+
+/**
+ * Xano may return HTTP 200 while echoing HubSpot's book API outcome under `response`.
+ * Treat HubSpot HTTP errors or result.status === "error" as booking failure.
+ */
+function parseRealGeeksHubSpotBookingFailure(resJson: Record<string, unknown>): RealGeeksHubSpotParse {
+  const resp = resJson.response;
+  if (!resp || typeof resp !== 'object') return { failed: false };
+  const r = resp as Record<string, unknown>;
+  const httpStatus = r.status;
+  const result = r.result;
+  const resultObj =
+    result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
+
+  const hubspotError =
+    (typeof httpStatus === 'number' && httpStatus >= 400) || resultObj?.status === 'error';
+
+  if (!hubspotError) return { failed: false };
+
+  const message =
+    (resultObj && typeof resultObj.message === 'string' && resultObj.message) ||
+    `HubSpot booking failed (${typeof httpStatus === 'number' ? httpStatus : 'error'})`;
+  const errorType =
+    resultObj && typeof resultObj.errorType === 'string' ? resultObj.errorType : undefined;
+  return { failed: true, message, errorType };
+}
+
 /** Chili Piper via book-slot: send either `dateTime` or both `date` (YYYY-MM-DD) and `time` (e.g. 1:25 PM). If both are sent, `dateTime` wins. */
 function buildBookSlotChiliBody(
   base: { email: string; firstName: string; lastName: string; phone: string },
@@ -179,8 +216,11 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify(chili.payload),
       });
       const bookSlotResponse = await bookSlotPost(bookSlotRequest);
-      const status = bookSlotResponse.status >= 200 && bookSlotResponse.status < 300 ? STATUS_SUCCESS : STATUS_FAILURE;
       const json = await bookSlotResponse.json();
+      if (bookSlotResponse.status === 203) {
+        return security.addSecurityHeaders(NextResponse.json(json, { status: 203 }));
+      }
+      const status = bookSlotResponse.status >= 200 && bookSlotResponse.status < 300 ? STATUS_SUCCESS : STATUS_FAILURE;
       return security.addSecurityHeaders(NextResponse.json(json, { status }));
     }
 
@@ -214,8 +254,11 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify(chili.payload),
       });
       const bookSlotResponse = await bookSlotPost(bookSlotRequest);
-      const status = bookSlotResponse.status >= 200 && bookSlotResponse.status < 300 ? STATUS_SUCCESS : STATUS_FAILURE;
       const json = await bookSlotResponse.json();
+      if (bookSlotResponse.status === 203) {
+        return security.addSecurityHeaders(NextResponse.json(json, { status: 203 }));
+      }
+      const status = bookSlotResponse.status >= 200 && bookSlotResponse.status < 300 ? STATUS_SUCCESS : STATUS_FAILURE;
       return security.addSecurityHeaders(NextResponse.json(json, { status }));
     }
 
@@ -380,7 +423,7 @@ export async function POST(request: NextRequest) {
         firstName,
         lastName,
         email,
-        phone: phone ?? '',
+        phone: phoneForRealGeeksXano(phone ?? ''),
         timeSlot,
       };
       console.log('[real-geeks xano] request', {
@@ -421,6 +464,30 @@ export async function POST(request: NextRequest) {
             NextResponse.json(errorResponse, { status: STATUS_FAILURE })
           );
         }
+
+        const hubSpotFail = parseRealGeeksHubSpotBookingFailure(resJson);
+        if (hubSpotFail.failed) {
+          const msgLower = hubSpotFail.message.toLowerCase();
+          const isSlot =
+            hubSpotFail.errorType === 'TIME_SLOT_NOT_AVAILABLE' ||
+            msgLower.includes('slot') ||
+            msgLower.includes('time slot');
+          const errorResponse = ErrorHandler.createError(
+            isSlot ? ErrorCode.SLOT_NOT_FOUND : ErrorCode.SCRAPING_FAILED,
+            hubSpotFail.message,
+            hubSpotFail.message,
+            {
+              response: resJson,
+              ...(hubSpotFail.errorType ? { errorType: hubSpotFail.errorType } : {}),
+            },
+            requestId,
+            Date.now() - requestStartTime
+          );
+          return security.addSecurityHeaders(
+            NextResponse.json(errorResponse, { status: STATUS_FAILURE })
+          );
+        }
+
         const successResponse = ErrorHandler.createSuccess(
           SuccessCode.OPERATION_SUCCESS,
           {

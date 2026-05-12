@@ -3,6 +3,10 @@
  * Used by get-slots and book-slot to resolve base URL and direct-calendar / form-fill behavior.
  */
 
+import type { SlotFallbackWindowMinutes } from './slot-fallback-window';
+
+export type { SlotFallbackWindowMinutes } from './slot-fallback-window';
+
 const DEFAULT_CINQ_URL =
   process.env.CHILI_PIPER_FORM_URL ||
   'https://cincpro.chilipiper.com/concierge-router/link/lp-request-a-demo-agent-advice';
@@ -17,6 +21,18 @@ export interface ChiliPiperVendorConfig {
   directCalendar: boolean;
   /** If true, after selecting a slot we must fill guest form (first/last/email) and click Confirm. */
   fillGuestFormAfterSlot: boolean;
+  /** Default ± window (minutes) for slot fallback when env override is not set. */
+  slotFallbackWindowMinutesDefault: SlotFallbackWindowMinutes;
+}
+
+function resolveChiliSlotFallbackWindowFromEnv(
+  vendorDefault: SlotFallbackWindowMinutes
+): SlotFallbackWindowMinutes {
+  const raw = process.env.CHILI_SLOT_FALLBACK_WINDOW_MINUTES?.trim();
+  if (raw === '15' || raw === '30') {
+    return raw === '15' ? 15 : 30;
+  }
+  return vendorDefault;
 }
 
 export const CHILI_PIPER_VENDOR_CONFIG: Record<string, ChiliPiperVendorConfig> = {
@@ -24,11 +40,13 @@ export const CHILI_PIPER_VENDOR_CONFIG: Record<string, ChiliPiperVendorConfig> =
     formUrl: DEFAULT_CINQ_URL,
     directCalendar: false,
     fillGuestFormAfterSlot: false,
+    slotFallbackWindowMinutesDefault: 30,
   },
   'luxury-presence': {
     formUrl: LUXURY_PRESENCE_URL,
     directCalendar: true,
     fillGuestFormAfterSlot: true,
+    slotFallbackWindowMinutesDefault: 15,
   },
 };
 
@@ -43,8 +61,15 @@ export function normalizeChiliPiperVendorId(vendor?: string | null): string {
 
 /**
  * Resolve vendor config by id. Falls back to cinq/default when vendor is missing or unknown.
+ * `slotFallbackWindowMinutes` is the effective window (env `CHILI_SLOT_FALLBACK_WINDOW_MINUTES` when 15|30, else vendor default).
  */
-export function getChiliPiperVendorConfig(vendor?: string | null): ChiliPiperVendorConfig {
+export function getChiliPiperVendorConfig(
+  vendor?: string | null
+): ChiliPiperVendorConfig & { slotFallbackWindowMinutes: SlotFallbackWindowMinutes } {
   const key = normalizeChiliPiperVendorId(vendor);
-  return CHILI_PIPER_VENDOR_CONFIG[key] ?? CHILI_PIPER_VENDOR_CONFIG[DEFAULT_VENDOR];
+  const base = CHILI_PIPER_VENDOR_CONFIG[key] ?? CHILI_PIPER_VENDOR_CONFIG[DEFAULT_VENDOR];
+  const slotFallbackWindowMinutes = resolveChiliSlotFallbackWindowFromEnv(
+    base.slotFallbackWindowMinutesDefault
+  );
+  return { ...base, slotFallbackWindowMinutes };
 }

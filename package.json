@@ -7,6 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint src --ext .ts",
+    "test:unit": "tsx --test src/lib/slot-fallback-window.test.ts",
     "licenses": "node scripts/generate-licenses.js",
     "licenses:generate": "node scripts/generate-licenses.js",
     "licenses:verify": "node scripts/verify-licenses.js",

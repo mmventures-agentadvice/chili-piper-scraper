@@ -1,13 +1,11 @@
 import type { Frame, Page } from 'playwright';
+import { pickChiliSlotWithFallback } from '@/lib/chili-slot-picker';
+import type { SlotFallbackWindowMinutes } from '@/lib/slot-fallback-window';
 
 type CalendarContext = Page | Frame;
 
 const MAX_WEEK_NAV = 26;
 const DAY_BUTTON = 'button[data-test-id^="days:"]';
-
-function formatTimeForSlot(time: string): string {
-  return time.replace(/\s+/g, '').toUpperCase();
-}
 
 function parseIsoDate(ymd: string): { y: number; m: number; d: number } {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
@@ -116,12 +114,11 @@ export async function bookLuxuryPresenceSlot(
     firstName: string;
     lastName: string;
     email: string;
+    slotFallbackWindowMinutes: SlotFallbackWindowMinutes;
     log: LuxuryBookLog;
-    logErr?: LuxuryBookLog;
   }
-): Promise<void> {
-  const { date, time, firstName, lastName, email, log, logErr } = params;
-  const err = logErr ?? log;
+): Promise<{ bookedTime: string }> {
+  const { date, time, firstName, lastName, email, slotFallbackWindowMinutes, log } = params;
 
   if (!firstName?.trim() || !lastName?.trim() || !email?.trim()) {
     throw new Error('firstName, lastName, and email are required for Luxury Presence booking');
@@ -195,50 +192,13 @@ export async function bookLuxuryPresenceSlot(
     await page.waitForTimeout(1000);
   }
 
-  const formatted = formatTimeForSlot(time);
-  const slotTimeId = `slot-${formatted}`;
-  const slotSelectors = [
-    `button[data-test-id="${slotTimeId}"]`,
-    `button[data-test-id="slot-${time.replace(/\s+/g, '')}"]`,
-    `button[data-test-id="slot-${time.replace(/\s+/g, '').toUpperCase()}"]`,
-    `button[data-test-id="slot-${time.replace(/\s+/g, '').toLowerCase()}"]`,
-  ];
-
-  let slotClicked = false;
-  for (const sel of slotSelectors) {
-    const slotBtn = await calendarContext.$(sel);
-    if (!slotBtn) continue;
-    const disabled = await slotBtn.evaluate(
-      (el) =>
-        (el as HTMLButtonElement).disabled ||
-        el.getAttribute('aria-disabled') === 'true' ||
-        el.hasAttribute('disabled')
-    );
-    if (disabled) continue;
-    await slotBtn.click();
-    slotClicked = true;
-    log('Luxury booking: clicked slot', { slotTimeId, sel });
-    break;
-  }
-
-  if (!slotClicked) {
-    let seen: string[] = [];
-    try {
-      seen = await calendarContext.$$eval('button[data-test-id^="slot-"]', (buttons: Element[]) =>
-        buttons.map((b) => b.getAttribute('data-test-id') || '').filter(Boolean)
-      );
-    } catch {
-      try {
-        seen = await page.$$eval('button[data-test-id^="slot-"]', (buttons: Element[]) =>
-          buttons.map((b) => b.getAttribute('data-test-id') || '').filter(Boolean)
-        );
-      } catch {
-        /* ignore */
-      }
-    }
-    err('Luxury booking: slot not found', { targetTime: time, slotTimeId, seenSlots: seen.slice(0, 30) });
-    throw new Error(`Slot not found for time ${time} (expected ${slotTimeId}).`);
-  }
+  const bookedTime = await pickChiliSlotWithFallback(
+    calendarContext,
+    date,
+    time,
+    slotFallbackWindowMinutes
+  );
+  log('Luxury booking: clicked slot', { bookedTime, requestedTime: time });
 
   await page.waitForTimeout(1000);
 
@@ -272,4 +232,5 @@ export async function bookLuxuryPresenceSlot(
   }
 
   await page.waitForTimeout(1500);
+  return { bookedTime };
 }
