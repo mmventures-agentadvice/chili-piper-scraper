@@ -16,6 +16,8 @@ import {
 import { getChiliPiperVendorConfig, normalizeChiliPiperVendorId } from '@/lib/chili-piper-vendors';
 import { bookLuxuryPresenceSlot } from '@/lib/luxury-presence-chili-booker';
 import { resolveBookSlotDateTime } from '@/lib/book-slot-datetime';
+import { pickChiliSlotWithFallback } from '@/lib/chili-slot-picker';
+import { ChiliSlotWindowExhaustedError } from '@/lib/slot-fallback-window';
 
 const security = new SecurityMiddleware();
 
@@ -807,6 +809,7 @@ export async function POST(request: NextRequest) {
           message: 'Slot booked successfully (TEST MODE - no actual booking performed)',
           date: date,
           time: time,
+          requestedTime: time,
           testMode: true,
         },
         requestId,
@@ -822,7 +825,16 @@ export async function POST(request: NextRequest) {
 
     // Run booking through concurrency manager
     const result = await concurrencyManager.execute(async (): Promise<
-      { success: true; date: string; time: string } | { success: false; error: string; videoPath?: string }
+      | { success: true; date: string; time: string; requestedTime: string }
+      | {
+          success: false;
+          kind: 'slot_window_exhausted';
+          requestedDate: string;
+          requestedTime: string;
+          slotFallbackWindowMinutes: 15 | 30;
+          availableSlotLabels: string[];
+        }
+      | { success: false; error: string; videoPath?: string }
     > => {
       const scraper = new ChiliPiperScraper(vendorConfig.formUrl);
       let instance: { browser: any; context: any; page: any; videoDir?: string; sessionId?: string } | null = null;
@@ -986,60 +998,63 @@ export async function POST(request: NextRequest) {
           if (!firstName || !lastName) {
             throw new Error('firstName and lastName are required for Luxury Presence booking');
           }
-          await bookLuxuryPresenceSlot(calendarContext, page, {
+          const { bookedTime } = await bookLuxuryPresenceSlot(calendarContext, page, {
             date,
             time,
             firstName,
             lastName,
             email,
+            slotFallbackWindowMinutes: vendorConfig.slotFallbackWindowMinutes,
             log,
-            logErr,
           });
           log('Booking step completed, cleaning up instance', { email });
           await browserInstanceManager.cleanupInstance(email);
-          return { success: true, date, time };
+          return { success: true, date, time: bookedTime, requestedTime: time };
         }
 
         // Find and click the day button (use calendar context: page or iframe)
         const dayButtons = await calendarContext.$$('[data-id="calendar-day-button"], button[data-test-id^="days:"]');
         let dayClicked = false;
         log('Day button search', { targetDate: date, buttonCount: dayButtons.length });
-        
-      for (const button of dayButtons) {
-        try {
-          const buttonText = await button.textContent();
-          if (!buttonText) continue;
-          
-          // Check if this button matches our target date
-          // Button text format: "Monday 13th November Mon13Nov" or similar
-          const dateMatch = buttonText.match(/(\d{1,2})(?:st|nd|rd|th)/i);
-          if (!dateMatch) continue;
-          
-          const day = parseInt(dateMatch[1], 10);
-          const targetDay = parseInt(date.split('-')[2], 10);
-          
-          // Also check month
-          const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
-                             'july', 'august', 'september', 'october', 'november', 'december'];
-          const targetMonth = parseInt(date.split('-')[1], 10);
-          const targetMonthName = monthNames[targetMonth - 1];
-          
-          const buttonTextLower = buttonText.toLowerCase();
-          const hasTargetMonth = buttonTextLower.includes(targetMonthName) || 
-                                buttonTextLower.includes(targetMonthName.substring(0, 3));
-          
-          if (day === targetDay && hasTargetMonth) {
-            await button.click();
-            dayClicked = true;
-            log('Clicked day button', { date });
-            break;
-          }
-        } catch (error) {
-          continue;
-        }
-      }
 
-      if (!dayClicked) {
+        for (const button of dayButtons) {
+          try {
+            const buttonText = await button.textContent();
+            if (!buttonText) continue;
+
+            // Check if this button matches our target date
+            // Button text format: "Monday 13th November Mon13Nov" or similar
+            const dateMatch = buttonText.match(/(\d{1,2})(?:st|nd|rd|th)/i);
+            if (!dateMatch) continue;
+
+            const day = parseInt(dateMatch[1], 10);
+            const targetDay = parseInt(date.split('-')[2], 10);
+
+            // Also check month
+            const monthNames = [
+              'january', 'february', 'march', 'april', 'may', 'june',
+              'july', 'august', 'september', 'october', 'november', 'december',
+            ];
+            const targetMonth = parseInt(date.split('-')[1], 10);
+            const targetMonthName = monthNames[targetMonth - 1];
+
+            const buttonTextLower = buttonText.toLowerCase();
+            const hasTargetMonth =
+              buttonTextLower.includes(targetMonthName) ||
+              buttonTextLower.includes(targetMonthName.substring(0, 3));
+
+            if (day === targetDay && hasTargetMonth) {
+              await button.click();
+              dayClicked = true;
+              log('Clicked day button', { date });
+              break;
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        if (!dayClicked) {
         const dayButtonTexts: string[] = [];
         for (const btn of dayButtons) {
           try {
@@ -1087,109 +1102,13 @@ export async function POST(request: NextRequest) {
         log('Could not log available slots', { error: (slotLogErr as Error).message });
       }
 
-      // Find and click the time slot button
-      const slotTimeId = `slot-${formattedTime}`;
-      let slotClicked = false;
-      
-      // Helper function to normalize time for comparison
-      const normalizeTime = (timeStr: string): string => {
-        return timeStr.trim()
-          .replace(/\s+/g, '') // Remove all spaces
-          .toUpperCase()
-          .replace(/^0+/, ''); // Remove leading zeros (e.g., "09:30" -> "9:30")
-      };
-
-      // Helper function to check if times match
-      const timesMatch = (time1: string, time2: string): boolean => {
-        const norm1 = normalizeTime(time1);
-        const norm2 = normalizeTime(time2);
-        return norm1 === norm2;
-      };
-      
-      // Try exact data-test-id match first (with variations)
-      const slotIdVariations = [
-        slotTimeId, // "slot-5:00PM"
-        `slot-${time.replace(/\s+/g, '')}`, // "slot-5:00 PM" -> "slot-5:00PM"
-        `slot-${time.replace(/\s+/g, '').toUpperCase()}`, // "slot-5:00PM" (already uppercase)
-        `slot-${time.replace(/\s+/g, '').toLowerCase()}`, // "slot-5:00pm"
-      ];
-      
-      for (const slotId of slotIdVariations) {
-        try {
-          const slotButton = await calendarContext.$(`button[data-test-id="${slotId}"]`);
-          if (slotButton) {
-            const isDisabled = await slotButton.evaluate((el: any) => 
-              el.disabled || el.getAttribute('aria-disabled') === 'true'
-            );
-            if (!isDisabled) {
-              await slotButton.click();
-              slotClicked = true;
-              log('Clicked time slot by data-test-id', { slotId });
-              break;
-            } else {
-              log('Slot button found but disabled', { slotId });
-            }
-          }
-        } catch (error) {
-          continue;
-        }
-      }
-
-      // Fallback: try by text content with improved matching
-      if (!slotClicked) {
-        const slotButtons = await calendarContext.$$('[data-id="calendar-slot"], button[data-test-id^="slot-"]');
-        log('Trying text matching for slot', { slotButtonCount: slotButtons.length, targetTime: time });
-        
-        for (const button of slotButtons) {
-          try {
-            const buttonText = await button.textContent();
-            if (!buttonText) continue;
-            
-            // Check if button is disabled
-            const isDisabled = await button.evaluate((el: any) => 
-              el.disabled || el.getAttribute('aria-disabled') === 'true'
-            );
-            if (isDisabled) {
-              continue;
-            }
-            
-            // Try multiple matching strategies
-            const trimmedText = buttonText.trim();
-            const normalizedButtonTime = normalizeTime(trimmedText);
-            const normalizedTargetTime = normalizeTime(time);
-            
-            // Match strategies:
-            // 1. Exact normalized match (e.g., "5:00PM" === "5:00PM")
-            // 2. Original text match (e.g., "5:00 PM" === "5:00 PM")
-            // 3. Case-insensitive match
-            if (normalizedButtonTime === normalizedTargetTime || 
-                trimmedText.toUpperCase() === time.toUpperCase() ||
-                trimmedText.toLowerCase() === time.toLowerCase() ||
-                timesMatch(trimmedText, time)) {
-              await button.click();
-              slotClicked = true;
-              log('Clicked time slot by text', { trimmedText, matchedTime: time });
-              break;
-            }
-          } catch (error) {
-            continue;
-          }
-        }
-      }
-
-      if (!slotClicked) {
-        // Get available slots one more time for error message
-        let availableSlotInfo = '';
-        try {
-          const slots = await calendarContext.$$eval('[data-id="calendar-slot"], button[data-test-id^="slot-"]', 
-            (buttons: Element[]) => buttons.map((b: Element) => b.textContent?.trim()).filter(Boolean) as string[]
-          );
-          availableSlotInfo = ` Available slots: ${slots.join(', ')}`;
-          logErr('Time slot button not found', { targetTime: time, slotTimeId, availableSlots: slots.slice(0, 30) });
-        } catch {}
-        
-        throw new Error(`Time slot button not found for time ${time} (formatted: ${slotTimeId}).${availableSlotInfo}`);
-      }
+      const bookedTime = await pickChiliSlotWithFallback(
+        calendarContext,
+        date,
+        time,
+        vendorConfig.slotFallbackWindowMinutes
+      );
+      log('Booked Chili slot', { bookedTime, requestedTime: time });
 
       // Wait a moment for slot selection to be processed
       await page.waitForTimeout(1000);
@@ -1224,12 +1143,28 @@ export async function POST(request: NextRequest) {
         }
       }
 
-        log('Booking step completed, cleaning up instance', { email });
-        // Close instance after successful booking
-        await browserInstanceManager.cleanupInstance(email);
+      log('Booking step completed, cleaning up instance', { email });
+      // Close instance after successful booking
+      await browserInstanceManager.cleanupInstance(email);
 
-        return { success: true, date, time };
+      return { success: true, date, time: bookedTime, requestedTime: time };
       } catch (err) {
+        if (err instanceof ChiliSlotWindowExhaustedError) {
+          logErr('Chili slot window exhausted', {
+            requestedDate: err.requestedDate,
+            requestedTime: err.requestedTime,
+            slotFallbackWindowMinutes: err.slotFallbackWindowMinutes,
+          });
+          await browserInstanceManager.cleanupInstance(email);
+          return {
+            success: false,
+            kind: 'slot_window_exhausted',
+            requestedDate: err.requestedDate,
+            requestedTime: err.requestedTime,
+            slotFallbackWindowMinutes: err.slotFallbackWindowMinutes,
+            availableSlotLabels: err.availableSlotLabels,
+          };
+        }
         const message = err instanceof Error ? err.message : String(err);
         const stack = err instanceof Error ? err.stack : undefined;
         logErr('Booking failed inside execute', { error: message, stack: stack?.slice(0, 800) });
@@ -1245,18 +1180,46 @@ export async function POST(request: NextRequest) {
     }, 30000); // 30 second timeout for booking
 
     if (!result.success) {
+      const fail = result as Extract<typeof result, { success: false }>;
+      if ('kind' in fail && fail.kind === 'slot_window_exhausted') {
+        const responseTime = Date.now() - requestStartTime;
+        console.warn('[book-slot] Slot fallback window exhausted', {
+          requestId,
+          requestedDate: fail.requestedDate,
+          requestedTime: fail.requestedTime,
+          slotFallbackWindowMinutes: fail.slotFallbackWindowMinutes,
+        });
+        const errorResponse = ErrorHandler.createError(
+          ErrorCode.SLOT_WINDOW_EXHAUSTED,
+          'No slot in fallback window',
+          `No bookable slot within ±${fail.slotFallbackWindowMinutes} minutes of ${fail.requestedTime} on ${fail.requestedDate}.`,
+          {
+            reason: 'slot_window_exhausted',
+            requestedTime: fail.requestedTime,
+            requestedDate: fail.requestedDate,
+            slotFallbackWindowMinutes: fail.slotFallbackWindowMinutes,
+            availableSlotsSample: fail.availableSlotLabels.slice(0, 30),
+          },
+          requestId,
+          responseTime
+        );
+        const response = NextResponse.json(errorResponse, { status: 203 });
+        return security.addSecurityHeaders(response);
+      }
+
+      const errResult = fail as { success: false; error: string; videoPath?: string };
       const responseTime = Date.now() - requestStartTime;
       console.error('[book-slot] Returning 500 – booking failed', {
         requestId,
-        error: result.error,
-        videoPath: result.videoPath,
+        error: errResult.error,
+        videoPath: errResult.videoPath,
         responseTimeMs: responseTime,
       });
       const errorResponse = ErrorHandler.createError(
         ErrorCode.SCRAPING_FAILED,
         'Booking failed',
-        result.error,
-        { videoPath: result.videoPath },
+        errResult.error,
+        { videoPath: errResult.videoPath },
         requestId,
         responseTime
       );
@@ -1271,6 +1234,7 @@ export async function POST(request: NextRequest) {
         message: 'Slot booked successfully',
         date: result.date,
         time: result.time,
+        requestedTime: result.requestedTime,
       },
       requestId,
       responseTime

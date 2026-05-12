@@ -178,6 +178,14 @@ Alternatively, pass **`date`** and **`time`** instead of `dateTime` (if both `da
 
 **Error Responses:** Same as the delegated endpoint (`/api/book-slot` or Calendly booking). Use a request timeout of at least **60 seconds** for Calendly vendors.
 
+**Chili Piper booking (`cinq`, `luxury-presence`):** If the exact time is not available, the server tries other **enabled** slots within a configurable ± window: default **30 minutes** for `cinq` and **15 minutes** for `luxury-presence`. Set env `CHILI_SLOT_FALLBACK_WINDOW_MINUTES` to `15` or `30` to override the default for all Chili vendors.
+
+**Chili success JSON (`data`):** `time` is the **booked** wall time. `requestedTime` repeats the time from the request (useful when the booked slot differs after fallback).
+
+**Chili HTTP 203 — slot window exhausted:** Returned when no enabled slot exists within the configured window for the requested day. Response body uses the standard error shape (`success: false`, `code`: `SLOT_WINDOW_EXHAUSTED`) with `error.metadata` including `reason`, `requestedTime`, `requestedDate`, `slotFallbackWindowMinutes`, and `availableSlotsSample`. In this project, **HTTP 203** specifically means “no bookable slot in the fallback window,” not general RFC 203 “non-authoritative information.”
+
+For **`POST /api/book`** with vendor `cinq` or `luxury-presence`, **203** and the JSON body are passed through unchanged (not converted to 200 or 201).
+
 ### 4. Book Calendly Slot (AgentFire Demo)
 
 **Endpoint:** `POST /api/book-calendly`
