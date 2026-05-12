@@ -17,7 +17,7 @@ import { getChiliPiperVendorConfig, normalizeChiliPiperVendorId } from '@/lib/ch
 import { bookLuxuryPresenceSlot } from '@/lib/luxury-presence-chili-booker';
 import { resolveBookSlotDateTime } from '@/lib/book-slot-datetime';
 import { pickChiliSlotWithFallback } from '@/lib/chili-slot-picker';
-import { ChiliSlotWindowExhaustedError } from '@/lib/slot-fallback-window';
+import { ChiliSlotWindowExhaustedError, computeBookedMismatchAmountMinutes } from '@/lib/slot-fallback-window';
 
 const security = new SecurityMiddleware();
 
@@ -810,6 +810,8 @@ export async function POST(request: NextRequest) {
           date: date,
           time: time,
           requestedTime: time,
+          bookedMismatch: false,
+          bookedMismatchAmount: 0,
           testMode: true,
         },
         requestId,
@@ -1235,6 +1237,11 @@ export async function POST(request: NextRequest) {
         date: result.date,
         time: result.time,
         requestedTime: result.requestedTime,
+        bookedMismatch: result.time !== result.requestedTime,
+        bookedMismatchAmount: computeBookedMismatchAmountMinutes(
+          result.requestedTime,
+          result.time
+        ),
       },
       requestId,
       responseTime

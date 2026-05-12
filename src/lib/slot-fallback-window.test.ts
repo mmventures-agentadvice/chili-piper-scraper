@@ -4,6 +4,7 @@ import {
   orderChiliSlotFallbackLabels,
   parseMinutesFromChiliSlotTestId,
   parseWallTimeToMinutes,
+  computeBookedMismatchAmountMinutes,
 } from './slot-fallback-window';
 
 describe('slot-fallback-window', () => {
@@ -41,5 +42,19 @@ describe('slot-fallback-window', () => {
     ];
     const ordered = orderChiliSlotFallbackLabels(target, 15, slots);
     assert.deepEqual(ordered, ['2:15 PM', '1:45 PM']);
+  });
+
+  it('computeBookedMismatchAmountMinutes: past and future offsets', () => {
+    assert.equal(
+      computeBookedMismatchAmountMinutes('2:00 PM', '1:45 PM'),
+      -15
+    );
+    assert.equal(
+      computeBookedMismatchAmountMinutes('2:00 PM', '1:30 PM'),
+      -30
+    );
+    assert.equal(computeBookedMismatchAmountMinutes('2:00 PM', '2:15 PM'), 15);
+    assert.equal(computeBookedMismatchAmountMinutes('2:00 PM', '2:30 PM'), 30);
+    assert.equal(computeBookedMismatchAmountMinutes('2:00 PM', '2:00 PM'), 0);
   });
 });

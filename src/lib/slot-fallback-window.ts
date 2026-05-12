@@ -43,6 +43,22 @@ export function parseWallTimeToMinutes(time: string): number | null {
   return hour * 60 + minute;
 }
 
+/**
+ * Signed difference in minutes: booked wall time minus requested (same calendar day).
+ * Negative when the booked slot is earlier than requested (e.g. requested 2:00 PM, booked 1:45 PM → -15).
+ * Positive when the booked slot is later (e.g. booked 2:15 PM → +15).
+ * Returns 0 when either value is unparseable or both resolve to the same minutes.
+ */
+export function computeBookedMismatchAmountMinutes(
+  requestedTime: string,
+  bookedTime: string
+): number {
+  const req = parseWallTimeToMinutes(requestedTime);
+  const book = parseWallTimeToMinutes(bookedTime);
+  if (req === null || book === null) return 0;
+  return book - req;
+}
+
 function normalizeDisplayLabel(label: string, minutes: number): string {
   const parsed = parseWallTimeToMinutes(label);
   if (parsed === minutes) {
